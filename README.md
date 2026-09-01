@@ -3,6 +3,12 @@
 A Pebble watchapp that lists the New York Times most prominent stories and lets
 you read each one's headline and summary on the watch.
 
+| Headline list | Story card |
+|---|---|
+| ![Headline list](docs/list.png) | ![Story card](docs/detail.png) |
+
+<sub>Emery (Pebble Time 2) emulator.</sub>
+
 ## What it does
 
 - On launch, the phone (PebbleKit JS) calls the NYT **Top Stories** API and
