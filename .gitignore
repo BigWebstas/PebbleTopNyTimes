@@ -1,0 +1,6 @@
+build/
+node_modules/
+.lock-waf_linux_build
+*.pbw
+.DS_Store
+.idea/

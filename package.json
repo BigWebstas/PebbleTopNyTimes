@@ -1,0 +1,51 @@
+{
+  "name": "pebble-top-nytimes",
+  "author": "BW",
+  "version": "1.0.0",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {
+    "pebble-clay": "^1.0.4"
+  },
+  "pebble": {
+    "displayName": "Top Stories",
+    "uuid": "96f9a931-7591-4d45-8d44-c3dcba06b13c",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [
+      "AppKeyReady",
+      "AppKeyRequest",
+      "AppKeyCount",
+      "AppKeyIndex",
+      "AppKeyTitle",
+      "AppKeyAbstract",
+      "AppKeySection",
+      "AppKeyByline",
+      "AppKeyError",
+      "ApiKey",
+      "Section",
+      "BacklightMode"
+    ],
+    "resources": {
+      "media": [
+        {
+          "type": "png",
+          "name": "IMAGE_MENU_ICON",
+          "file": "images/menu_icon.png",
+          "menuIcon": true
+        }
+      ]
+    }
+  }
+}
