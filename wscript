@@ -4,32 +4,9 @@
 # Feel free to customize this to your needs.
 #
 import os.path
-import shutil
 
 top = '.'
 out = 'build'
-
-
-def _patch_clay_platforms():
-    """pebble-clay (last published 2016) predates the gabbro/flint platforms.
-    `pebble build` reinstalls/prunes node_modules before waf ever runs, which
-    wipes anything tools/patch-clay-platforms.js added, so redo it here right
-    before waf's per-platform include check. Clay is pure PebbleKit JS with no
-    native code, so copying an existing platform's stub headers is safe.
-    """
-    clay_root = os.path.join('node_modules', 'pebble-clay', 'dist')
-    # dist/binaries/<platform>/libpebble-clay.a is an empty archive (8-byte "!<arch>\n"
-    # magic, identical bytes on every shipped platform) -- there's no native code to
-    # be ABI-incompatible, so copying it across platforms is safe.
-    for sub in ('include/pebble-clay', 'binaries'):
-        root = os.path.join(clay_root, sub)
-        src = os.path.join(root, 'emery')
-        if not os.path.isdir(src):
-            continue
-        for platform in ('gabbro', 'flint'):
-            dest = os.path.join(root, platform)
-            if not os.path.isdir(dest):
-                shutil.copytree(src, dest)
 
 
 def options(ctx):
@@ -43,12 +20,10 @@ def configure(ctx):
     change after calling ctx.load('pebble_sdk') and make sure to set the correct environment first.
     Universal configuration: add your change prior to calling ctx.load('pebble_sdk').
     """
-    _patch_clay_platforms()
     ctx.load('pebble_sdk')
 
 
 def build(ctx):
-    _patch_clay_platforms()
     ctx.load('pebble_sdk')
 
     build_worker = os.path.exists('worker_src')

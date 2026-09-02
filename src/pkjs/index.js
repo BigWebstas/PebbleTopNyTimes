@@ -1,9 +1,8 @@
-var Clay = require('pebble-clay');
-var clayConfig = require('./config');
-var clay = new Clay(clayConfig);
+var configPage = require('./config-page');
 
 var DEFAULT_SECTION = 'home';
 var MAX_ARTICLES = 15;
+var SETTINGS_KEY = 'nyt-settings';
 
 // Fallback key so the app works before the settings page is opened.
 // Override it any time in the Pebble app's settings for this watchapp.
@@ -11,9 +10,22 @@ var FALLBACK_API_KEY = 'hR22xKV2euZaAs8zpMbLSMU60A7umk9028l9IQODl4dUffOn';
 
 function getSettings() {
   try {
-    return JSON.parse(localStorage.getItem('clay-settings')) || {};
+    var raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) {
+      // Migrate values saved by the old Clay config page.
+      raw = localStorage.getItem('clay-settings');
+    }
+    return JSON.parse(raw) || {};
   } catch (e) {
     return {};
+  }
+}
+
+function saveSettings(settings) {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch (e) {
+    // localStorage full or unavailable - nothing we can do.
   }
 }
 
@@ -27,8 +39,8 @@ function sendError(text) {
 }
 
 // Sent as its own standalone message so it can arrive even if the article
-// fetch below fails. Clay stores select values as strings; coerce explicitly
-// so the watch always gets a real int32 AppMessage tuple.
+// fetch below fails. The config page stores the select value as a string;
+// coerce explicitly so the watch always gets a real int32 AppMessage tuple.
 function sendBacklightMode(next) {
   var settings = getSettings();
   var mode = parseInt(settings.BacklightMode, 10);
@@ -117,12 +129,35 @@ Pebble.addEventListener('appmessage', function (e) {
   }
 });
 
+Pebble.addEventListener('showConfiguration', function () {
+  Pebble.openURL(configPage.buildConfigPageUrl(getSettings()));
+});
+
 // Re-apply after the settings page is closed (e.g. API key, section, or
 // backlight mode changed).
 Pebble.addEventListener('webviewclosed', function (e) {
-  if (e && e.response) {
-    setTimeout(function () {
-      sendBacklightMode(fetchTopStories);
-    }, 300);
+  if (!e || !e.response) {
+    return;  // user backed out without saving
   }
+
+  var next;
+  try {
+    next = JSON.parse(decodeURIComponent(e.response));
+  } catch (err) {
+    try {
+      next = JSON.parse(e.response);
+    } catch (err2) {
+      return;
+    }
+  }
+
+  var settings = getSettings();
+  settings.ApiKey = next.ApiKey || '';
+  settings.Section = next.Section || DEFAULT_SECTION;
+  settings.BacklightMode = next.BacklightMode || '0';
+  saveSettings(settings);
+
+  setTimeout(function () {
+    sendBacklightMode(fetchTopStories);
+  }, 300);
 });

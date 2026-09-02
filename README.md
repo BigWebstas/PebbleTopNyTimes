@@ -32,6 +32,9 @@ you read each one's headline and summary on the watch.
   than the watch's own default: 5/15/30/60 seconds after a button press, or
   always on while the app is open. Same scheme as PebbleSuperProductivity's
   backlight setting.
+- The phone settings page follows the system light/dark theme, via a
+  `color-scheme` meta tag and a `prefers-color-scheme` media query, matching
+  PebbleSuperProductivity.
 
 ## Setup
 
@@ -60,17 +63,16 @@ pebble emu-app-config --emulator basalt
 |------|------|
 | `src/c/main.c` | Watch UI: headline menu + detail card, AppMessage receiver |
 | `src/pkjs/index.js` | Fetches the NYT API, streams articles to the watch |
-| `src/pkjs/config.js` | Clay settings page (API key, section) |
+| `src/pkjs/config-page.js` | Self-contained settings page (API key, section, backlight) |
 | `resources/images/menu_icon.png` | Launcher icon: the `{T}` mark from the NYT dev portal (25x25) |
 | `tools/make_icon.py` | Rebuilds the icon from `tools/nyt-devportal-logo.jpg` (`python3 tools/make_icon.py`; args: `T` for the bare blackletter T, `white` for white ink) |
 
 ## Platforms
 
 Targets aplite, basalt, chalk, diorite, emery, and gabbro (Pebble Time 2, the
-only touchscreen platform here). `pebble-clay` hasn't shipped a release since
-2016 and doesn't know about gabbro; `wscript` patches its vendored platform
-folders in before every build (it ships no native code, just empty per-platform
-placeholder files, so this is safe — see the comment in `wscript`).
+only touchscreen platform here). No PebbleKit JS dependencies: the settings
+page is a self-contained `data:` URL built in `src/pkjs/config-page.js`, so
+there is nothing to keep current for new platforms.
 
 ## Message protocol
 

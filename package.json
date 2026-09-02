@@ -4,9 +4,6 @@
   "version": "1.0.0",
   "keywords": ["pebble-app"],
   "private": true,
-  "dependencies": {
-    "pebble-clay": "^1.0.4"
-  },
   "pebble": {
     "displayName": "Top Stories",
     "uuid": "96f9a931-7591-4d45-8d44-c3dcba06b13c",
@@ -33,8 +30,6 @@
       "AppKeySection",
       "AppKeyByline",
       "AppKeyError",
-      "ApiKey",
-      "Section",
       "BacklightMode"
     ],
     "resources": {
