@@ -15,6 +15,7 @@ typedef struct {
 
 static Article s_articles[MAX_ARTICLES];
 static int s_article_count = 0;
+static int s_expected_count = -1; // -1 until AppKeyCount arrives
 static bool s_loading = true;
 static char s_status[64] = "Loading top stories…";
 
@@ -40,9 +41,10 @@ static AppTimer *s_backlight_timer = NULL;
 #define ROW_HEIGHT 62
 #define ROW_SECTION_HEIGHT 20
 #define ROW_TITLE_LINE_H 30
-#define DETAIL_FONT_KEY FONT_KEY_GOTHIC_28
-#define SCROLL_INTERVAL_MS 100
-#define SCROLL_STEP_PX 2
+#define DETAIL_TITLE_FONT_KEY FONT_KEY_GOTHIC_28_BOLD
+#define DETAIL_BODY_FONT_KEY FONT_KEY_GOTHIC_24
+#define DETAIL_BYLINE_FONT_KEY FONT_KEY_GOTHIC_18
+#define DETAIL_GAP 10
 #else
 #define TITLE_FONT_KEY FONT_KEY_GOTHIC_18_BOLD
 #define SECTION_FONT_KEY FONT_KEY_GOTHIC_14
@@ -52,11 +54,25 @@ static AppTimer *s_backlight_timer = NULL;
 #define ROW_HEIGHT 44
 #define ROW_SECTION_HEIGHT 16
 #define ROW_TITLE_LINE_H 22
-#define DETAIL_FONT_KEY FONT_KEY_GOTHIC_24
-#define SCROLL_INTERVAL_MS 300
-#define SCROLL_STEP_PX 6
+#define DETAIL_TITLE_FONT_KEY FONT_KEY_GOTHIC_24_BOLD
+#define DETAIL_BODY_FONT_KEY FONT_KEY_GOTHIC_18
+#define DETAIL_BYLINE_FONT_KEY FONT_KEY_GOTHIC_14
+#define DETAIL_GAP 6
 #endif
 #define SCROLL_GAP_PX 24
+
+// Marquee cadence. One pixel every tick is a smooth glide instead of a coarse
+// jump; the start pause lets you read the beginning of a title before it moves,
+// and the wrap pause gives a beat before it repeats.
+#define SCROLL_INTERVAL_MS 50
+#define SCROLL_STEP_PX 1
+#define SCROLL_START_PAUSE_MS 1500
+#define SCROLL_END_PAUSE_MS 700
+
+// How long to keep the loading screen up waiting for the rest of the articles
+// after the last one arrived, before revealing a partial list. Re-armed on
+// every incoming article, so a slow-but-progressing stream is never cut off.
+#define REVEAL_TIMEOUT_MS 12000
 
 static Window *s_list_window;
 static TextLayer *s_banner_layer;
@@ -66,13 +82,23 @@ static TextLayer *s_status_layer;
 // Marquee state for the selected row's title.
 static AppTimer *s_scroll_timer = NULL;
 static int s_scroll_offset_px = 0;
+static int s_scroll_period_px = 0; // selected title width + gap; 0 when not scrolling
+
+// Holds the loading screen up until every article has arrived - see
+// reveal_timer_callback and inbox_received.
+static AppTimer *s_reveal_timer = NULL;
 
 static Window *s_detail_window;
 static ScrollLayer *s_detail_scroll;
-static TextLayer *s_detail_text;
-static char s_detail_buf[TITLE_LEN + ABSTRACT_LEN + SECTION_LEN + BYLINE_LEN + 16];
+static TextLayer *s_detail_title_layer;
+static TextLayer *s_detail_body_layer;
+static TextLayer *s_detail_byline_layer;
+static char s_detail_title_buf[TITLE_LEN];
+static char s_detail_body_buf[ABSTRACT_LEN];
+static char s_detail_byline_buf[BYLINE_LEN];
 
 static void refresh_menu(void);
+static void cancel_reveal_timer(void);
 
 // ---------- Backlight ----------
 
@@ -118,28 +144,61 @@ static void apply_backlight_mode(void) {
 
 // ---------- Detail window ----------
 
+// Build one word-wrapped text layer, size it to its content, and return the y
+// for whatever comes next. Each block is its own layer so the title can be bold
+// and larger and the byline small and dimmed - a single TextLayer can't mix
+// fonts.
+static TextLayer *add_detail_block(int16_t x, int16_t *y, int16_t w, const char *text,
+                                   const char *font_key, GColor color) {
+  TextLayer *tl = text_layer_create(GRect(x, *y, w, 2000));
+  text_layer_set_font(tl, fonts_get_system_font(font_key));
+  text_layer_set_overflow_mode(tl, GTextOverflowModeWordWrap);
+  text_layer_set_background_color(tl, GColorClear);
+  text_layer_set_text_color(tl, color);
+  text_layer_set_text(tl, text);
+  GSize used = text_layer_get_content_size(tl);
+  text_layer_set_size(tl, GSize(w, used.h));
+  *y += used.h;
+  scroll_layer_add_child(s_detail_scroll, text_layer_get_layer(tl));
+  return tl;
+}
+
 static void detail_window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(root);
 
+  s_detail_byline_layer = NULL;
+
   s_detail_scroll = scroll_layer_create(bounds);
   scroll_layer_set_click_config_onto_window(s_detail_scroll, window);
-
-  s_detail_text = text_layer_create(GRect(4, 0, bounds.size.w - 8, 2000));
-  text_layer_set_font(s_detail_text, fonts_get_system_font(DETAIL_FONT_KEY));
-  text_layer_set_text(s_detail_text, s_detail_buf);
-  text_layer_set_overflow_mode(s_detail_text, GTextOverflowModeWordWrap);
-
-  GSize used = text_layer_get_content_size(s_detail_text);
-  text_layer_set_size(s_detail_text, GSize(bounds.size.w - 8, used.h + 12));
-  scroll_layer_set_content_size(s_detail_scroll, GSize(bounds.size.w, used.h + 16));
-
-  scroll_layer_add_child(s_detail_scroll, text_layer_get_layer(s_detail_text));
   layer_add_child(root, scroll_layer_get_layer(s_detail_scroll));
+
+  int16_t pad = DETAIL_GAP;
+  int16_t w = bounds.size.w - 2 * pad;
+  int16_t y = pad;
+
+  s_detail_title_layer = add_detail_block(pad, &y, w, s_detail_title_buf,
+                                          DETAIL_TITLE_FONT_KEY, GColorBlack);
+  y += DETAIL_GAP;
+  s_detail_body_layer = add_detail_block(pad, &y, w, s_detail_body_buf,
+                                         DETAIL_BODY_FONT_KEY, GColorBlack);
+  if (s_detail_byline_buf[0]) {
+    y += DETAIL_GAP;
+    s_detail_byline_layer = add_detail_block(pad, &y, w, s_detail_byline_buf,
+                                             DETAIL_BYLINE_FONT_KEY,
+                                             PBL_IF_COLOR_ELSE(GColorDarkGray, GColorBlack));
+  }
+
+  scroll_layer_set_content_size(s_detail_scroll, GSize(bounds.size.w, y + pad));
 }
 
 static void detail_window_unload(Window *window) {
-  text_layer_destroy(s_detail_text);
+  text_layer_destroy(s_detail_title_layer);
+  text_layer_destroy(s_detail_body_layer);
+  if (s_detail_byline_layer) {
+    text_layer_destroy(s_detail_byline_layer);
+    s_detail_byline_layer = NULL;
+  }
   scroll_layer_destroy(s_detail_scroll);
   window_destroy(s_detail_window);
   s_detail_window = NULL;
@@ -150,10 +209,13 @@ static void show_detail(int index) {
     return;
   }
   Article *a = &s_articles[index];
-  snprintf(s_detail_buf, sizeof(s_detail_buf), "%s\n\n%s\n\n%s",
-           a->title,
-           a->abstract[0] ? a->abstract : "(no summary)",
-           a->byline[0] ? a->byline : "");
+  strncpy(s_detail_title_buf, a->title, sizeof(s_detail_title_buf) - 1);
+  s_detail_title_buf[sizeof(s_detail_title_buf) - 1] = '\0';
+  strncpy(s_detail_body_buf, a->abstract[0] ? a->abstract : "(no summary)",
+          sizeof(s_detail_body_buf) - 1);
+  s_detail_body_buf[sizeof(s_detail_body_buf) - 1] = '\0';
+  strncpy(s_detail_byline_buf, a->byline, sizeof(s_detail_byline_buf) - 1);
+  s_detail_byline_buf[sizeof(s_detail_byline_buf) - 1] = '\0';
 
   s_detail_window = window_create();
   window_set_window_handlers(s_detail_window, (WindowHandlers) {
@@ -246,9 +308,15 @@ static void stop_scroll_timer(void) {
 }
 
 static void scroll_timer_callback(void *data) {
+  s_scroll_timer = NULL;
   s_scroll_offset_px += SCROLL_STEP_PX;
+  uint32_t next_ms = SCROLL_INTERVAL_MS;
+  if (s_scroll_period_px > 0 && s_scroll_offset_px >= s_scroll_period_px) {
+    s_scroll_offset_px -= s_scroll_period_px; // wrapped a full loop - hold a beat
+    next_ms = SCROLL_END_PAUSE_MS;
+  }
   layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
-  s_scroll_timer = app_timer_register(SCROLL_INTERVAL_MS, scroll_timer_callback, NULL);
+  s_scroll_timer = app_timer_register(next_ms, scroll_timer_callback, NULL);
 }
 
 // Start or stop the marquee to match whether the selected title overflows its
@@ -258,16 +326,22 @@ static void refresh_scroll_state(bool reset_offset) {
     s_scroll_offset_px = 0;
   }
   bool needs_scroll = false;
+  s_scroll_period_px = 0;
   if (s_menu_layer && !status_visible()) {
     MenuIndex sel = menu_layer_get_selected_index(s_menu_layer);
     if (sel.row < s_article_count) {
       int16_t available = layer_get_bounds(menu_layer_get_layer(s_menu_layer)).size.w
                           - 2 * ROW_H_PAD;
-      needs_scroll = title_natural_width(s_articles[sel.row].title) > available;
+      int16_t natural = title_natural_width(s_articles[sel.row].title);
+      needs_scroll = natural > available;
+      if (needs_scroll) {
+        s_scroll_period_px = natural + SCROLL_GAP_PX;
+      }
     }
   }
   if (needs_scroll && !s_scroll_timer) {
-    s_scroll_timer = app_timer_register(SCROLL_INTERVAL_MS, scroll_timer_callback, NULL);
+    // Start pause: read the beginning of the title before it moves.
+    s_scroll_timer = app_timer_register(SCROLL_START_PAUSE_MS, scroll_timer_callback, NULL);
   } else if (!needs_scroll) {
     stop_scroll_timer();
   }
@@ -301,8 +375,6 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
   int16_t available = bounds.size.w - 2 * pad;
   bool focused = menu_cell_layer_is_highlighted(cell_layer);
 
-  graphics_context_set_text_color(ctx, focused ? GColorWhite : GColorBlack);
-
   int16_t section_h = a->section[0] ? ROW_SECTION_HEIGHT : 0;
   int16_t block_h = ROW_TITLE_LINE_H + section_h;
   int16_t y = (bounds.size.h - block_h) / 2;
@@ -310,9 +382,14 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     y = 2;
   }
 
+  graphics_context_set_text_color(ctx, focused ? GColorWhite : GColorBlack);
   draw_row_title(ctx, a, pad, y, available, focused);
 
   if (section_h) {
+    // Dimmed against the title so the row reads title-first; on B&W the
+    // dimmed color collapses back to the focus color, same as before.
+    graphics_context_set_text_color(
+        ctx, focused ? GColorWhite : PBL_IF_COLOR_ELSE(GColorDarkGray, GColorBlack));
     graphics_draw_text(ctx, a->section, fonts_get_system_font(SECTION_FONT_KEY),
                        GRect(pad, y + ROW_TITLE_LINE_H, available, section_h),
                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
@@ -340,8 +417,8 @@ static void list_window_load(Window *window) {
 
   // Fixed banner: unlike a MenuLayer section header, this never scrolls.
   s_banner_layer = text_layer_create(GRect(0, 0, bounds.size.w, BANNER_HEIGHT));
-  text_layer_set_background_color(s_banner_layer, GColorLightGray);
-  text_layer_set_text_color(s_banner_layer, GColorBlack);
+  text_layer_set_background_color(s_banner_layer, GColorBlack);
+  text_layer_set_text_color(s_banner_layer, GColorWhite);
   text_layer_set_font(s_banner_layer, fonts_get_system_font(BANNER_FONT_KEY));
   text_layer_set_text_alignment(s_banner_layer, GTextAlignmentCenter);
   text_layer_set_text(s_banner_layer, "NYT TOP STORIES");
@@ -363,8 +440,13 @@ static void list_window_load(Window *window) {
   // (PebbleSuperProductivity's approach) has no such gap.
   layer_add_child(root, menu_layer_get_layer(s_menu_layer));
 
-  s_status_layer = text_layer_create(GRect(6, BANNER_HEIGHT + list_bounds.size.h / 3,
-                                           bounds.size.w - 12, bounds.size.h));
+  // Centered in the list area, height bounded so it never runs off screen.
+  int16_t status_h = 96;
+  int16_t status_y = BANNER_HEIGHT + (list_bounds.size.h - status_h) / 2;
+  if (status_y < BANNER_HEIGHT) {
+    status_y = BANNER_HEIGHT;
+  }
+  s_status_layer = text_layer_create(GRect(6, status_y, bounds.size.w - 12, status_h));
   text_layer_set_font(s_status_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
   text_layer_set_text_alignment(s_status_layer, GTextAlignmentCenter);
   text_layer_set_overflow_mode(s_status_layer, GTextOverflowModeWordWrap);
@@ -377,6 +459,7 @@ static void list_window_load(Window *window) {
 
 static void list_window_unload(Window *window) {
   stop_scroll_timer();
+  cancel_reveal_timer();
   text_layer_destroy(s_status_layer);
   s_status_layer = NULL;
   menu_layer_destroy(s_menu_layer);
@@ -394,6 +477,25 @@ static void refresh_menu(void) {
     layer_set_hidden(menu_layer_get_layer(s_menu_layer), status_visible());
   }
   refresh_scroll_state(true);
+}
+
+// ---------- Loading reveal ----------
+
+static void cancel_reveal_timer(void) {
+  if (s_reveal_timer) {
+    app_timer_cancel(s_reveal_timer);
+    s_reveal_timer = NULL;
+  }
+}
+
+// Fires only if the article stream stalls partway. Shows whatever arrived
+// rather than leaving the loading screen up forever.
+static void reveal_timer_callback(void *data) {
+  s_reveal_timer = NULL;
+  if (s_loading && s_article_count > 0) {
+    s_loading = false;
+    refresh_menu();
+  }
 }
 
 // ---------- AppMessage ----------
@@ -418,6 +520,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
 
   Tuple *err = dict_find(iter, MESSAGE_KEY_AppKeyError);
   if (err) {
+    cancel_reveal_timer();
     s_loading = false;
     s_article_count = 0;
     strncpy(s_status, err->value->cstring, sizeof(s_status) - 1);
@@ -429,9 +532,17 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *count = dict_find(iter, MESSAGE_KEY_AppKeyCount);
   if (count) {
     s_article_count = 0;
-    s_loading = (count->value->int32 > 0);
-    if (count->value->int32 == 0) {
+    s_expected_count = count->value->int32;
+    // Stay on the loading screen until every row is in - the list then
+    // appears fully populated in one paint instead of growing row by row.
+    s_loading = (s_expected_count > 0);
+    if (s_expected_count == 0) {
       strncpy(s_status, "No stories found", sizeof(s_status) - 1);
+    } else {
+      strncpy(s_status, "Loading top stories…", sizeof(s_status) - 1);
+      s_status[sizeof(s_status) - 1] = '\0';
+      cancel_reveal_timer();
+      s_reveal_timer = app_timer_register(REVEAL_TIMEOUT_MS, reveal_timer_callback, NULL);
     }
     refresh_menu();
     return;
@@ -448,8 +559,20 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
       if (i + 1 > s_article_count) {
         s_article_count = i + 1;
       }
-      s_loading = false;
-      refresh_menu();
+      if (s_expected_count >= 0 && s_article_count >= s_expected_count) {
+        cancel_reveal_timer();
+        s_loading = false;
+        refresh_menu();
+      } else if (s_loading) {
+        // Still waiting on more rows: keep the loading screen, but push the
+        // stall timeout back since the stream is making progress.
+        cancel_reveal_timer();
+        s_reveal_timer = app_timer_register(REVEAL_TIMEOUT_MS, reveal_timer_callback, NULL);
+      } else {
+        // Loading screen already dismissed (stall fallback fired) - just
+        // fold the late row into the visible list.
+        refresh_menu();
+      }
     }
   }
 }
@@ -502,6 +625,7 @@ static void deinit(void) {
     app_timer_cancel(s_backlight_timer);
   }
   stop_scroll_timer();
+  cancel_reveal_timer();
   light_enable(false);
   window_destroy(s_list_window);
 }
