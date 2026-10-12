@@ -4,3 +4,5 @@ node_modules/
 *.pbw
 .DS_Store
 .idea/
+GEMINI.md
+CLAUDE.md
